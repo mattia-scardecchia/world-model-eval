@@ -30,7 +30,7 @@ def normalize_actions(unnorm_actions, statistics, key="bridge_orig/1.0.0"):
     return norm_actions
 
 def evaluate_spatialvla(wm, vla, processor, trials, retries=1, rollout_length=40,
-                        save_video=False, video_out_dir=None):
+                        save_video=False, video_out_dir=None, root_dir=None):
     """
     Roll out SpatialVLA on a list of trials discovered from ROOT_DIR and return per-trial scores.
     """
@@ -71,8 +71,20 @@ def evaluate_spatialvla(wm, vla, processor, trials, retries=1, rollout_length=40
                         frames.append(new_frame)
                 rollout_video = np.stack(frames)
                 if save_video and video_out_dir:
-                    vid_name = Path(trial["trial_png"]).stem
-                    media.write_video(str(Path(video_out_dir) / f"{vid_name}.mp4"), rollout_video, fps=20)
+                    trial_png = Path(trial["trial_png"])
+                    target_dir = Path(video_out_dir)
+                    if root_dir is not None:
+                        try:
+                            rel_parent = trial_png.parent.relative_to(Path(root_dir))
+                            target_dir = target_dir / rel_parent
+                        except ValueError:
+                            target_dir = target_dir / trial_png.parent.name
+                    else:
+                        target_dir = target_dir / trial_png.parent.name
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    vid_name = trial_png.stem
+                    out_name = f"{vid_name}.mp4"
+                    media.write_video(str(target_dir / out_name), rollout_video, fps=20)
 
                 score = predict(rollout_video, trial)
                 results.append({
@@ -133,6 +145,7 @@ def run(
         retries=retries,
         save_video=save_video,
         video_out_dir=video_out_dir,
+        root_dir=root_dir,
     )
 
     agg = aggregate_model_results(results)
