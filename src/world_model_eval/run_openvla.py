@@ -19,21 +19,26 @@ from pathlib import Path
 
 
 def evaluate_openvla(wm, vla, processor, trials, retries=1, rollout_length=40,
-                     save_video=False, video_out_dir=None, root_dir=None):
+                     save_video=False, video_out_dir=None, root_dir=None,
+                     scorer_n=5, return_raw=False):
     """
     Rollout an OpenVLA model on a list of tasks, and return the score on each task.
     Arguments:
         wm: WorldModel
         vla: An OpenVLA model from `transformers`
         tasks: A list of N tasks in loaded from a json. See "put_carrot_on_plate.json" for an example of the format.
+        scorer_n: number of GPT-4o generations to sample per video (majority-voted).
+        return_raw: when True, also return a flat scorer_log list with per-scorer-call rows.
     Returns:
-        scores: A list of N scores from the VLM corresponding to each input task.
+        results (list): per (trial, retry) majority-voted scores.
+        When return_raw=True: (results, scorer_log) tuple.
     """
     results = []
+    scorer_log = []
     if save_video and video_out_dir:
         Path(video_out_dir).mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
-        for trial in tqdm(trials, desc="Openvla trials"):
+        for trial_idx, trial in enumerate(tqdm(trials, desc="Openvla trials")):
             start_frame = np.array(Image.open(trial["trial_png"]).resize((256, 256)))
             for r in range(retries):
                 wm.reset(torch.from_numpy(start_frame).cuda().float() / 255.0)
@@ -56,6 +61,7 @@ def evaluate_openvla(wm, vla, processor, trials, retries=1, rollout_length=40,
                         new_frame = np.clip(new_frame * 255, 0, 255).astype(np.uint8)
                         frames.append(new_frame)
                 rollout_video = np.stack(frames)
+                video_out_path = None
                 if save_video and video_out_dir:
                     trial_png = Path(trial["trial_png"])
                     target_dir = Path(video_out_dir)
@@ -70,13 +76,38 @@ def evaluate_openvla(wm, vla, processor, trials, retries=1, rollout_length=40,
                     target_dir.mkdir(parents=True, exist_ok=True)
                     vid_name = trial_png.stem
                     out_name = f"{vid_name}.mp4"
-                    media.write_video(str(target_dir / out_name), rollout_video, fps=20)
-                score = predict(rollout_video, trial)
+                    video_out_path = str(target_dir / out_name)
+                    media.write_video(video_out_path, rollout_video, fps=20)
+                if return_raw:
+                    score, per_call = predict(rollout_video, trial, n=scorer_n, return_raw=True)
+                    for call_idx, call in enumerate(per_call):
+                        scorer_log.append({
+                            "task_key": trial["task_key"],
+                            "task_display": trial["task_display"],
+                            "trial_idx": trial_idx,
+                            "trial_png": str(trial["trial_png"]),
+                            "retry_idx": r,
+                            "scorer_call_idx": call_idx,
+                            "video_path": video_out_path,
+                            "score": call["parsed_score"],
+                            "rationale": call["rationale"],
+                            "openai_meta": {
+                                "model": call["model"],
+                                "finish_reason": call["finish_reason"],
+                                "prompt_tokens": call["prompt_tokens"],
+                                "completion_tokens": call["completion_tokens"],
+                                "response_id": call["response_id"],
+                            },
+                        })
+                else:
+                    score = predict(rollout_video, trial, n=scorer_n)
                 results.append({
                     "task_key": trial["task_key"],
                     "task_display": trial["task_display"],
                     "score": float(score),
                 })
+    if return_raw:
+        return results, scorer_log
     return results
 
 CHECKPOINTS_TO_KWARGS = {

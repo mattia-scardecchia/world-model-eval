@@ -206,18 +206,21 @@ def _build_rt1_observation(frame_hist, instr_embed):
 
 
 def evaluate_rt1(wm: WorldModel, policy: RT1Policy, trials, rollout_length=40, retries=1,
-                 history_len=15, save_video=False, video_out_dir=None, root_dir=None):
+                 history_len=15, save_video=False, video_out_dir=None, root_dir=None,
+                 scorer_n=5, return_raw=False):
   """
   Evaluate RT-1 on discovered trials using the world model. Returns a list of per-trial dicts with 'score'.
+  When return_raw=True, also returns a flat scorer_log list with per-scorer-call rows.
   """
   results = []
+  scorer_log = []
   if save_video and video_out_dir:
     Path(video_out_dir).mkdir(parents=True, exist_ok=True)
 
   use = get_use()
 
   with torch.no_grad():
-    for trial in tqdm(trials, desc="RT-1 trials"):
+    for trial_idx, trial in enumerate(tqdm(trials, desc="RT-1 trials")):
       start_frame = np.array(Image.open(trial["trial_png"]).resize((256, 256)))
 
       emb = use([trial['instruction']]).numpy()[0].astype(np.float32)
@@ -259,6 +262,7 @@ def evaluate_rt1(wm: WorldModel, policy: RT1Policy, trials, rollout_length=40, r
             hist.append(new_frame)
 
         rollout_video = np.stack(frames)
+        video_out_path = None
         if save_video and video_out_dir:
           trial_png = Path(trial["trial_png"])
           rel_parent = (
@@ -270,14 +274,39 @@ def evaluate_rt1(wm: WorldModel, policy: RT1Policy, trials, rollout_length=40, r
           target_dir.mkdir(parents=True, exist_ok=True)
           stem = trial_png.stem
           out_name = f"{stem}.mp4"
-          media.write_video(str(target_dir / out_name), rollout_video, fps=20)
+          video_out_path = str(target_dir / out_name)
+          media.write_video(video_out_path, rollout_video, fps=20)
 
-        score = predict(rollout_video, trial)
+        if return_raw:
+          score, per_call = predict(rollout_video, trial, n=scorer_n, return_raw=True)
+          for call_idx, call in enumerate(per_call):
+            scorer_log.append({
+                "task_key": trial["task_key"],
+                "task_display": trial["task_display"],
+                "trial_idx": trial_idx,
+                "trial_png": str(trial["trial_png"]),
+                "retry_idx": r,
+                "scorer_call_idx": call_idx,
+                "video_path": video_out_path,
+                "score": call["parsed_score"],
+                "rationale": call["rationale"],
+                "openai_meta": {
+                    "model": call["model"],
+                    "finish_reason": call["finish_reason"],
+                    "prompt_tokens": call["prompt_tokens"],
+                    "completion_tokens": call["completion_tokens"],
+                    "response_id": call["response_id"],
+                },
+            })
+        else:
+          score = predict(rollout_video, trial, n=scorer_n)
         results.append({
             "task_key": trial["task_key"],
             "task_display": trial["task_display"],
             "score": float(score),
         })
+  if return_raw:
+    return results, scorer_log
   return results
 
 
